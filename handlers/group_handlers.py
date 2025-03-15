@@ -9,27 +9,28 @@ import random
 import logging
 import aiosqlite
 
-# Инициализация роутера и памяти
 group_router = Router()
 memory = BotMemory()
 logger = logging.getLogger(__name__)
 
-# Глобальные переменные
 chat_reactions_cache = {}
-active_settings_user = {}  # Хранит {chat_id: user_id}
+active_settings_user = {}
 
-# Сообщения на разных языках
 MESSAGES = {
     "ru": {
         "start": "Привет всем, меня Углём звать. Настройте язык, позязя :)",
         "only_admins": "Только администраторы могут настраивать меня!",
         "settings_in_use": "Настройки уже использует другой пользователь!",
-        "intel_prompt": "Ответьте числом (0-100) на это сообщение для уровня интеллекта:",
-        "freq_prompt": "Ответьте числом (0-100) на это сообщение для частоты ответа:",
+        "intel_prompt": "Ответьте числом от 0 до 100 на это сообщение для уровня интеллекта:",
+        "freq_prompt": "Ответьте числом от 0 до 100 на это сообщение для частоты ответа:",
         "invalid_range": "Значение должно быть от 0 до 100!",
         "no_reactions": "Реакции в этом чате отключены или не настроены.",
         "no_messages": "Я еще не знаю, что сказать!",
-        "back": "Назад"
+        "back": "Назад",
+        "help": "*Справка по Угольку:*\n"
+                "• `/start` - Настроить язык (только админы)\n"
+                "• `/settings` - Изменить интеллект и частоту (только админы)\n"
+                "• `/help` - Показать эту справку"
     },
     "uk": {
         "start": "Привіт усім, мене Вуглем звати. Налаштуйте мову, будь ласка :)",
@@ -40,7 +41,11 @@ MESSAGES = {
         "invalid_range": "Значення має бути від 0 до 100!",
         "no_reactions": "Реакції в цьому чаті відключені або не налаштовані.",
         "no_messages": "Я ще не знаю, що сказати!",
-        "back": "Назад"
+        "back": "Назад",
+        "help": "*Довідка по Вуглю:*\n"
+                "• `/start` - Налаштувати мову (тільки адміни)\n"
+                "• `/settings` - Змінити інтелект і частоту (тільки адміни)\n"
+                "• `/help` - Показати цю довідку"
     },
     "en": {
         "start": "Hello everyone, I'm called Uglyok. Please set the language :)",
@@ -51,11 +56,14 @@ MESSAGES = {
         "invalid_range": "Value must be between 0 and 100!",
         "no_reactions": "Reactions in this chat are disabled or not configured.",
         "no_messages": "I don't know what to say yet!",
-        "back": "Back"
+        "back": "Back",
+        "help": "*Uglyok Help:*\n"
+                "• `/start` - Set language (admins only)\n"
+                "• `/settings` - Adjust intelligence and frequency (admins only)\n"
+                "• `/help` - Show this help"
     }
 }
 
-# Обработчик добавления бота в группу
 @group_router.chat_member(ChatMemberUpdatedFilter(IS_NOT_MEMBER >> IS_MEMBER))
 async def bot_added_to_group(event: types.ChatMemberUpdated, bot: Bot):
     if event.new_chat_member.user.id == event.bot.id:
@@ -64,16 +72,14 @@ async def bot_added_to_group(event: types.ChatMemberUpdated, bot: Bot):
         await memory.add_chat(chat_id, chat_title)
         logger.info(f"Бот добавлен в чат {chat_id} с названием {chat_title}")
         if chat_id in chat_reactions_cache:
-            del chat_reactions_cache[chat_id]  # Очищаем кэш реакций при добавлении
+            del chat_reactions_cache[chat_id]
 
-# Обработчик сообщений в группе (кроме команд /start и /settings)
-@group_router.message(~Command(commands=["start", "settings"]))
+@group_router.message(~Command(commands=["start", "settings", "help"]))
 async def handle_group_message(message: types.Message, bot: Bot, state: FSMContext):
     chat_id = message.chat.id
     message_id = message.message_id
     logger.debug(f"Получено сообщение в чате {chat_id}, ID: {message_id}")
 
-    # Регистрируем чат, если он новый
     async with aiosqlite.connect("uglyok.db") as db:
         cursor = await db.execute("SELECT COUNT(*) FROM chats WHERE chat_id = ?", (chat_id,))
         count = (await cursor.fetchone())[0]
@@ -82,7 +88,6 @@ async def handle_group_message(message: types.Message, bot: Bot, state: FSMConte
             await memory.add_chat(chat_id, chat_title)
             logger.info(f"Чат {chat_id} зарегистрирован: {chat_title}")
 
-    # Сохраняем сообщение, если оно уникально
     content = message.text if message.text else message.sticker.file_id if message.sticker else None
     msg_type = "text" if message.text else "sticker" if message.sticker else None
     if content and msg_type:
@@ -92,12 +97,10 @@ async def handle_group_message(message: types.Message, bot: Bot, state: FSMConte
         else:
             logger.debug(f"Сообщение типа {msg_type} '{content}' уже существует, пропускаем")
 
-    # Проверяем частоту ответа
     frequency = await memory.get_response_frequency(chat_id)
     logger.debug(f"Частота ответа для чата {chat_id}: {frequency}%")
     lang = await memory.get_language(chat_id)
 
-    # Шанс поставить реакцию
     available_reactions = await get_available_reactions(bot, chat_id, chat_reactions_cache)
     if available_reactions and random.randint(0, 100) <= frequency:
         reaction = random.choice(available_reactions)
@@ -112,17 +115,19 @@ async def handle_group_message(message: types.Message, bot: Bot, state: FSMConte
         except Exception as e:
             logger.error(f"Ошибка при установке реакции {reaction} в чате {chat_id}: {e}")
 
-    # Шанс отправить текстовый ответ (независимо от реакции)
     if random.randint(0, 100) <= frequency:
-        random_message = await memory.get_random_message(chat_id)
+        msg_type, random_message = await memory.get_random_message(chat_id)
         if random_message:
-            await message.reply(random_message)
-            logger.debug(f"Отправлен текстовый ответ '{random_message}' в чате {chat_id}")
+            if msg_type == "text":
+                await message.reply(random_message)
+                logger.debug(f"Отправлен текстовый ответ '{random_message}' в чате {chat_id}")
+            elif msg_type == "sticker":
+                await bot.send_sticker(chat_id, random_message)
+                logger.debug(f"Отправлен стикер '{random_message}' в чате {chat_id}")
         else:
             await message.reply(MESSAGES[lang]["no_messages"])
             logger.debug(f"Нет сохраненных сообщений для чата {chat_id}, отправлено стандартное сообщение")
 
-# Обработчик reply для кастомного интеллекта
 @group_router.message(SettingsState.CustomIntel, lambda m: m.text and m.text.isdigit() and m.reply_to_message)
 async def set_custom_intelligence(message: types.Message, bot: Bot, state: FSMContext):
     chat_id = message.chat.id
@@ -135,7 +140,7 @@ async def set_custom_intelligence(message: types.Message, bot: Bot, state: FSMCo
         return
 
     if "message_id" not in data or message.reply_to_message.message_id != data["message_id"]:
-        return  # Игнорируем, если это не ответ на нужное сообщение
+        return
 
     level = int(message.text)
     if 0 <= level <= 100:
@@ -143,11 +148,10 @@ async def set_custom_intelligence(message: types.Message, bot: Bot, state: FSMCo
         await message.reply(f"{translate_button('intel', level, lang)} set!")
         await state.clear()
         if chat_id in active_settings_user:
-            del active_settings_user[chat_id]  # Освобождаем настройки
+            del active_settings_user[chat_id]
     else:
         await message.reply(MESSAGES[lang]["invalid_range"])
 
-# Обработчик reply для кастомной частоты
 @group_router.message(SettingsState.CustomFreq, lambda m: m.text and m.text.isdigit() and m.reply_to_message)
 async def set_custom_frequency(message: types.Message, bot: Bot, state: FSMContext):
     chat_id = message.chat.id
@@ -160,7 +164,7 @@ async def set_custom_frequency(message: types.Message, bot: Bot, state: FSMConte
         return
 
     if "message_id" not in data or message.reply_to_message.message_id != data["message_id"]:
-        return  # Игнорируем, если это не ответ на нужное сообщение
+        return
 
     freq = int(message.text)
     if 0 <= freq <= 100:
@@ -168,11 +172,10 @@ async def set_custom_frequency(message: types.Message, bot: Bot, state: FSMConte
         await message.reply(f"{translate_button('freq', freq, lang)} set!")
         await state.clear()
         if chat_id in active_settings_user:
-            del active_settings_user[chat_id]  # Освобождаем настройки
+            del active_settings_user[chat_id]
     else:
         await message.reply(MESSAGES[lang]["invalid_range"])
 
-# Обработчик команды /start
 @group_router.message(Command("start"))
 async def start_command(message: types.Message, bot: Bot):
     chat_id = message.chat.id
@@ -185,14 +188,13 @@ async def start_command(message: types.Message, bot: Bot):
         return
 
     buttons = [
-        InlineKeyboardButton(text="Русский 🇷🇺", callback_data=f"lang_{chat_id}_ru"),
-        InlineKeyboardButton(text="Українська 🇺🇦", callback_data=f"lang_{chat_id}_uk"),
-        InlineKeyboardButton(text="English 🇺🇸", callback_data=f"lang_{chat_id}_en")
+        [InlineKeyboardButton(text="Русский 🇷🇺", callback_data=f"lang_{chat_id}_ru")],
+        [InlineKeyboardButton(text="Українська 🇺🇦", callback_data=f"lang_{chat_id}_uk")],
+        [InlineKeyboardButton(text="English 🇺🇸", callback_data=f"lang_{chat_id}_en")]
     ]
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await message.reply(MESSAGES[lang]["start"], reply_markup=keyboard)
 
-# Обработчик выбора языка
 @group_router.callback_query(lambda c: c.data.startswith("lang_"))
 async def process_language_selection(callback: types.CallbackQuery, bot: Bot):
     parts = callback.data.split("_")
@@ -214,7 +216,6 @@ async def process_language_selection(callback: types.CallbackQuery, bot: Bot):
         await callback.message.edit_text("Error setting language!")
     await callback.answer()
 
-# Обработчик команды /settings
 @group_router.message(Command("settings"))
 async def settings_command(message: types.Message, bot: Bot):
     chat_id = message.chat.id
@@ -244,10 +245,9 @@ async def settings_command(message: types.Message, bot: Bot):
             callback_data=f"set_freq_menu_{chat_id}"
         )]
     ]
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await message.reply("Settings:", reply_markup=keyboard)
 
-# Обработчик меню интеллекта
 @group_router.callback_query(lambda c: c.data.startswith("set_intel_menu_"))
 async def intel_menu(callback: types.CallbackQuery, bot: Bot):
     chat_id = int(callback.data.split("_")[-1])
@@ -266,11 +266,10 @@ async def intel_menu(callback: types.CallbackQuery, bot: Bot):
         [InlineKeyboardButton(text=translate_button("custom", intelligence, lang), callback_data=f"custom_intel_{chat_id}")],
         [InlineKeyboardButton(text=MESSAGES[lang]["back"], callback_data=f"back_to_settings_{chat_id}")]
     ]
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await callback.message.edit_text(translate_button("intel", intelligence, lang), reply_markup=keyboard)
     await callback.answer()
 
-# Обработчик выбора интеллекта
 @group_router.callback_query(lambda c: c.data.startswith("set_intel_"))
 async def process_intelligence_selection(callback: types.CallbackQuery, bot: Bot):
     parts = callback.data.split("_")
@@ -289,7 +288,6 @@ async def process_intelligence_selection(callback: types.CallbackQuery, bot: Bot
         await callback.message.edit_text("Error setting intelligence!")
     await callback.answer()
 
-# Обработчик кастомного интеллекта
 @group_router.callback_query(lambda c: c.data.startswith("custom_intel_"))
 async def process_custom_intelligence(callback: types.CallbackQuery, bot: Bot, state: FSMContext):
     chat_id = int(callback.data.split("_")[-1])
@@ -305,7 +303,6 @@ async def process_custom_intelligence(callback: types.CallbackQuery, bot: Bot, s
     await callback.message.edit_text(MESSAGES[lang]["intel_prompt"])
     await callback.answer()
 
-# Обработчик меню частоты ответа
 @group_router.callback_query(lambda c: c.data.startswith("set_freq_menu_"))
 async def freq_menu(callback: types.CallbackQuery, bot: Bot):
     chat_id = int(callback.data.split("_")[-1])
@@ -324,11 +321,10 @@ async def freq_menu(callback: types.CallbackQuery, bot: Bot):
         [InlineKeyboardButton(text=translate_button("custom", frequency, lang), callback_data=f"custom_freq_{chat_id}")],
         [InlineKeyboardButton(text=MESSAGES[lang]["back"], callback_data=f"back_to_settings_{chat_id}")]
     ]
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await callback.message.edit_text(translate_button("freq", frequency, lang), reply_markup=keyboard)
     await callback.answer()
 
-# Обработчик выбора частоты
 @group_router.callback_query(lambda c: c.data.startswith("set_freq_"))
 async def process_frequency_selection(callback: types.CallbackQuery, bot: Bot):
     parts = callback.data.split("_")
@@ -347,7 +343,6 @@ async def process_frequency_selection(callback: types.CallbackQuery, bot: Bot):
         await callback.message.edit_text("Error setting frequency!")
     await callback.answer()
 
-# Обработчик кастомной частоты
 @group_router.callback_query(lambda c: c.data.startswith("custom_freq_"))
 async def process_custom_frequency(callback: types.CallbackQuery, bot: Bot, state: FSMContext):
     chat_id = int(callback.data.split("_")[-1])
@@ -363,7 +358,6 @@ async def process_custom_frequency(callback: types.CallbackQuery, bot: Bot, stat
     await callback.message.edit_text(MESSAGES[lang]["freq_prompt"])
     await callback.answer()
 
-# Обработчик кнопки "Назад"
 @group_router.callback_query(lambda c: c.data.startswith("back_to_settings_"))
 async def back_to_settings(callback: types.CallbackQuery, bot: Bot):
     chat_id = int(callback.data.split("_")[-1])
@@ -386,6 +380,13 @@ async def back_to_settings(callback: types.CallbackQuery, bot: Bot):
             callback_data=f"set_freq_menu_{chat_id}"
         )]
     ]
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await callback.message.edit_text("Settings:", reply_markup=keyboard)
     await callback.answer()
+
+@group_router.message(Command("help"))
+async def help_command(message: types.Message, bot: Bot):
+    chat_id = message.chat.id
+    lang = await memory.get_language(chat_id)
+    logger.info(f"Команда /help вызвана в чате {chat_id}")
+    await message.reply(MESSAGES[lang]["help"], parse_mode="Markdown")
